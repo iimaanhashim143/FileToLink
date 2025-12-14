@@ -1,4 +1,4 @@
-# KPS/server/stream_routes.py
+# KPS/server/stream_routes.py (FIXED & OPTIMIZED FOR HTML5 / video.js)
 
 import re
 import secrets
@@ -22,13 +22,13 @@ SECURE_HASH_LENGTH = 6
 CHUNK_SIZE = 1024 * 1024
 MAX_CONCURRENT_PER_CLIENT = 8
 RANGE_REGEX = re.compile(r"bytes=(?P<start>\d*)-(?P<end>\d*)")
-PATTERN_HASH_FIRST = re.compile(
-    rf"^([a-zA-Z0-9_-]{{{SECURE_HASH_LENGTH}}})(\d+)(?:/.*)?$")
+PATTERN_HASH_FIRST = re.compile(rf"^([a-zA-Z0-9_-]{{{SECURE_HASH_LENGTH}}})(\d+)(?:/.*)?$")
 PATTERN_ID_FIRST = re.compile(r"^(\d+)(?:/.*)?$")
 VALID_HASH_REGEX = re.compile(r'^[a-zA-Z0-9_-]+$')
 
 streamers = {}
 mimetypes.init()
+
 
 def get_streamer(client_id: int) -> ByteStreamer:
     if client_id not in streamers:
@@ -41,46 +41,21 @@ def parse_media_request(path: str, query: dict) -> tuple[int, str]:
 
     match = PATTERN_HASH_FIRST.match(clean_path)
     if match:
-        try:
-            message_id = int(match.group(2))
-            secure_hash = match.group(1)
-            if (len(secure_hash) == SECURE_HASH_LENGTH and
-                    VALID_HASH_REGEX.match(secure_hash)):
-                return message_id, secure_hash
-        except ValueError as e:
-            raise InvalidHash(f"Invalid message ID format in path: {e}") from e
+        return int(match.group(2)), match.group(1)
 
     match = PATTERN_ID_FIRST.match(clean_path)
     if match:
-        try:
-            message_id = int(match.group(1))
-            secure_hash = query.get("hash", "").strip()
-            if (len(secure_hash) == SECURE_HASH_LENGTH and
-                    VALID_HASH_REGEX.match(secure_hash)):
-                return message_id, secure_hash
-            else:
-                raise InvalidHash("Invalid or missing hash in query parameter")
-        except ValueError as e:
-            raise InvalidHash(f"Invalid message ID format in path: {e}") from e
+        message_id = int(match.group(1))
+        secure_hash = query.get("hash", "").strip()
+        if len(secure_hash) == SECURE_HASH_LENGTH and VALID_HASH_REGEX.match(secure_hash):
+            return message_id, secure_hash
 
-    raise InvalidHash("Invalid URL structure or missing hash")
+    raise InvalidHash("Invalid URL or missing hash")
 
 
 def select_optimal_client() -> tuple[int, ByteStreamer]:
-    if not work_loads:
-        raise web.HTTPInternalServerError(
-            text=("No available clients to handle the request. "
-                  "Please try again later."))
-
-    available_clients = [
-        (cid, load) for cid, load in work_loads.items()
-        if load < MAX_CONCURRENT_PER_CLIENT]
-
-    if available_clients:
-        client_id = min(available_clients, key=lambda x: x[1])[0]
-    else:
-        client_id = min(work_loads, key=work_loads.get)
-
+    available = [(cid, load) for cid, load in work_loads.items() if load < MAX_CONCURRENT_PER_CLIENT]
+    client_id = min(available, key=lambda x: x[1])[0] if available else min(work_loads, key=work_loads.get)
     return client_id, get_streamer(client_id)
 
 
@@ -90,26 +65,13 @@ def parse_range_header(range_header: str, file_size: int) -> tuple[int, int]:
 
     match = RANGE_REGEX.match(range_header)
     if not match:
-        raise web.HTTPBadRequest(text=f"Invalid range header: {range_header}")
+        raise web.HTTPBadRequest(text="Invalid Range header")
 
-    start_str = match.group("start")
-    end_str = match.group("end")
-    if start_str:
-        start = int(start_str)
-        end = int(end_str) if end_str else file_size - 1
-    else:
-        if not end_str:
-            raise web.HTTPBadRequest(text=f"Invalid range header: {range_header}")
-        suffix_len = int(end_str)
-        if suffix_len <= 0:
-            raise web.HTTPRequestRangeNotSatisfiable(headers={"Content-Range": f"bytes */{file_size}"})
-        start = max(file_size - suffix_len, 0)
-        end = file_size - 1
+    start = int(match.group('start') or 0)
+    end = int(match.group('end') or file_size - 1)
 
-    if start < 0 or end >= file_size or start > end:
-        raise web.HTTPRequestRangeNotSatisfiable(
-            headers={"Content-Range": f"bytes */{file_size}"}
-        )
+    if start > end or end >= file_size:
+        raise web.HTTPRequestRangeNotSatisfiable(headers={"Content-Range": f"bytes */{file_size}"})
 
     return start, end
 
@@ -122,161 +84,69 @@ async def root_redirect(request):
 @routes.get("/status", allow_head=True)
 async def status_endpoint(request):
     uptime = time.time() - StartTime
-    total_load = sum(work_loads.values())
-    workload_distribution = {str(k): v for k, v in sorted(work_loads.items())}
-
     return web.json_response({
-        "server": {
-            "status": "operational",
-            "version": __version__,
-            "uptime": get_readable_time(uptime)
-        },
-        "telegram_bot": {
-            "username": f"@{StreamBot.username}",
-            "active_clients": len(multi_clients)
-        },
-        "resources": {
-            "total_workload": total_load,
-            "workload_distribution": workload_distribution
-        }
+        "server": {"status": "operational", "version": __version__, "uptime": get_readable_time(uptime)},
+        "telegram_bot": {"username": f"@{StreamBot.username}", "active_clients": len(multi_clients)},
+        "resources": {"total_workload": sum(work_loads.values()), "distribution": work_loads}
     })
 
 
 @routes.get(r"/watch/kpsbots-{path:.+}", allow_head=True)
 async def media_preview(request: web.Request):
-    try:
-        path = request.match_info["path"]
-        message_id, secure_hash = parse_media_request(path, request.query)
-
-        rendered_page = await render_page(
-            message_id, secure_hash, requested_action='stream')
-        return web.Response(text=rendered_page, content_type='text/html')
-
-    except (InvalidHash, FileNotFound) as e:
-        logger.debug(
-            f"Client error in preview: {type(e).__name__} - {e}",
-            exc_info=True)
-        raise web.HTTPNotFound(text="Resource not found") from e
-    except Exception as e:
-        error_id = secrets.token_hex(6)
-        logger.error(f"Preview error {error_id}: {e}", exc_info=True)
-        raise web.HTTPInternalServerError(
-            text=f"Server error occurred: {error_id}") from e
+    path = request.match_info['path']
+    message_id, secure_hash = parse_media_request(path, request.query)
+    page = await render_page(message_id, secure_hash, requested_action='stream')
+    return web.Response(text=page, content_type='text/html')
 
 
 @routes.get(r"/kpsbots-{path:.+}", allow_head=True)
 async def media_delivery(request: web.Request):
+    path = request.match_info['path']
+    message_id, secure_hash = parse_media_request(path, request.query)
+
+    client_id, streamer = select_optimal_client()
+    work_loads[client_id] += 1
+
     try:
-        path = request.match_info["path"]
-        message_id, secure_hash = parse_media_request(path, request.query)
+        info = await streamer.get_file_info(message_id)
+        if info['unique_id'][:SECURE_HASH_LENGTH] != secure_hash:
+            raise InvalidHash("Hash mismatch")
 
-        client_id, streamer = select_optimal_client()
-        work_loads[client_id] += 1
+        file_size = info['file_size']
+        range_header = request.headers.get('Range')
+        start, end = parse_range_header(range_header, file_size)
+        content_length = end - start + 1
 
-        try:
-            file_info = await streamer.get_file_info(message_id)
-            if not file_info.get('unique_id'):
-                raise FileNotFound("File unique ID not found in info.")
+        filename = info.get('file_name') or f"video_{message_id}.mp4"
+        mime_type = info.get('mime_type') or mimetypes.guess_type(filename)[0] or 'video/mp4'
 
-            if (file_info['unique_id'][:SECURE_HASH_LENGTH] !=
-                    secure_hash):
-                raise InvalidHash(
-                    "Provided hash does not match file's unique ID.")
+        headers = {
+            "Content-Type": mime_type,
+            "Content-Length": str(content_length),
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
+            "Accept-Ranges": "bytes",
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Cache-Control": "public, max-age=31536000",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Range",
+            "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",
+            "X-Content-Type-Options": "nosniff"
+        }
 
-            file_size = file_info.get('file_size', 0)
-            if file_size == 0:
-                raise FileNotFound(
-                    "File size is reported as zero or unavailable.")
+        if request.method == 'HEAD':
+            return web.Response(status=206, headers=headers)
 
-            range_header = request.headers.get("Range", "")
-            start, end = parse_range_header(range_header, file_size)
-            content_length = end - start + 1
+        async def stream():
+            sent = 0
+            async for chunk in streamer.stream_file(message_id, offset=start, limit=content_length):
+                if sent + len(chunk) > content_length:
+                    chunk = chunk[:content_length - sent]
+                sent += len(chunk)
+                yield chunk
+                if sent >= content_length:
+                    break
 
-            if start == 0 and end == file_size - 1:
-                range_header = ""
+        return web.Response(status=206, body=stream(), headers=headers)
 
-            filename = (file_info.get('file_name') or f"file_{secrets.token_hex(4)}")
-            
-            # --- FIX: Better MIME Type Detection for Browser Player ---
-            mime_type = file_info.get('mime_type')
-            if not mime_type or mime_type == 'application/octet-stream':
-                mime_type, _ = mimetypes.guess_type(filename)
-                if not mime_type:
-                    # Fallback to mp4 if we can't guess, helping the player to try
-                    mime_type = 'video/mp4'
-            # ----------------------------------------------------------
-
-            headers = {
-                "Content-Type": mime_type,
-                "Content-Length": str(content_length),
-                "Content-Disposition": (
-                    f"inline; filename*=UTF-8''{quote(filename)}"),
-                "Accept-Ranges": "bytes",
-                "Cache-Control": "public, max-age=31536000",
-                "Connection": "keep-alive",
-                "Access-Control-Allow-Origin": "*", # Fix for CORS issues
-                "Access-Control-Allow-Headers": "Range"
-            }
-
-            if range_header:
-                headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
-
-            if request.method == 'HEAD':
-                work_loads[client_id] -= 1
-                return web.Response(
-                    status=206 if range_header else 200,
-                    headers=headers
-                )
-
-            async def stream_generator():
-                try:
-                    bytes_sent = 0
-                    bytes_to_skip = start % CHUNK_SIZE
-
-                    async for chunk in streamer.stream_file(
-                            message_id, offset=start, limit=content_length):
-                        if bytes_to_skip > 0:
-                            if len(chunk) <= bytes_to_skip:
-                                bytes_to_skip -= len(chunk)
-                                continue
-                            chunk = chunk[bytes_to_skip:]
-                            bytes_to_skip = 0
-
-                        remaining = content_length - bytes_sent
-                        if len(chunk) > remaining:
-                            chunk = chunk[:remaining]
-
-                        if chunk:
-                            yield chunk
-                            bytes_sent += len(chunk)
-
-                        if bytes_sent >= content_length:
-                            break
-                finally:
-                    work_loads[client_id] -= 1
-            return web.Response(
-                status=206 if range_header else 200,
-                body=stream_generator(),
-                headers=headers
-            )
-
-        except (FileNotFound, InvalidHash):
-            work_loads[client_id] -= 1
-            raise
-        except Exception as e:
-            work_loads[client_id] -= 1
-            error_id = secrets.token_hex(6)
-            logger.error(
-                f"Stream error {error_id}: {e}",
-                exc_info=True)
-            raise web.HTTPInternalServerError(
-                text=f"Server error during streaming: {error_id}") from e
-
-    except (InvalidHash, FileNotFound) as e:
-        logger.debug(f"Client error: {type(e).__name__} - {e}", exc_info=True)
-        raise web.HTTPNotFound(text="Resource not found") from e
-    except Exception as e:
-        error_id = secrets.token_hex(6)
-        logger.error(f"Server error {error_id}: {e}", exc_info=True)
-        raise web.HTTPInternalServerError(
-            text=f"An unexpected server error occurred: {error_id}") from e
+    finally:
+        work_loads[client_id] -= 1
