@@ -1,8 +1,7 @@
-# KPS/utils/bot_utils.py (FIXED VERSION)
+# KPS/utils/bot_utils.py (FULLY FIXED VERSION)
 
 import asyncio
 from typing import Any, Dict, Optional
-from urllib.parse import quote
 
 from pyrogram import Client
 from pyrogram.enums import ChatMemberStatus
@@ -14,7 +13,7 @@ from pyrogram.types import (
 )
 
 from KPS.utils.database import db
-from KPS.utils.file_properties import get_fname, get_fsize, get_hash
+from KPS.utils.file_properties import get_fname, get_fsize
 from KPS.utils.handler import handle_flood_wait
 from KPS.utils.human_readable import humanbytes
 from KPS.utils.logger import logger
@@ -28,11 +27,9 @@ from KPS.utils.shortener import shorten
 from KPS.vars import Var
 
 
-# -------------------- Notifications --------------------
-
 async def notify_ch(cli: Client, txt: str):
     if not (
-        hasattr(Var, 'BIN_CHANNEL')
+        hasattr(Var, "BIN_CHANNEL")
         and isinstance(Var.BIN_CHANNEL, int)
         and Var.BIN_CHANNEL != 0
     ):
@@ -43,12 +40,10 @@ async def notify_ch(cli: Client, txt: str):
 async def notify_own(cli: Client, txt: str):
     o_ids = Var.OWNER_ID if isinstance(Var.OWNER_ID, (list, tuple, set)) else [Var.OWNER_ID]
     tasks = [handle_flood_wait(cli.send_message, chat_id=oid, text=txt) for oid in o_ids]
-    if hasattr(Var, 'BIN_CHANNEL') and isinstance(Var.BIN_CHANNEL, int) and Var.BIN_CHANNEL != 0:
+    if hasattr(Var, "BIN_CHANNEL") and isinstance(Var.BIN_CHANNEL, int) and Var.BIN_CHANNEL != 0:
         tasks.append(handle_flood_wait(cli.send_message, chat_id=Var.BIN_CHANNEL, text=txt))
     await asyncio.gather(*tasks, return_exceptions=True)
 
-
-# -------------------- User / Error helpers --------------------
 
 async def reply_user_err(msg: Message, err_txt: str):
     await handle_flood_wait(
@@ -66,7 +61,7 @@ async def log_newusr(cli: Client, uid: int, fname: str):
         if await db.is_user_exist(uid):
             return
         await db.add_user(uid)
-        if hasattr(Var, 'BIN_CHANNEL') and isinstance(Var.BIN_CHANNEL, int) and Var.BIN_CHANNEL != 0:
+        if hasattr(Var, "BIN_CHANNEL") and isinstance(Var.BIN_CHANNEL, int) and Var.BIN_CHANNEL != 0:
             await handle_flood_wait(
                 cli.send_message,
                 chat_id=Var.BIN_CHANNEL,
@@ -76,23 +71,25 @@ async def log_newusr(cli: Client, uid: int, fname: str):
         logger.error(f"Database error in log_newusr for user {uid}: {e}")
 
 
-# -------------------- LINK GENERATOR (FIXED) --------------------
+# ====================== FIXED LINK GENERATOR ======================
 
 async def gen_links(fwd_msg: Message, shortener: bool = True) -> Dict[str, str]:
-    """
-    Generates STREAM and DOWNLOAD links in the format required by stream_routes.py
-
-    FINAL FORMAT:
-      /watch/kpsbots-<6CHAR_HASH><MESSAGE_ID>
-      /kpsbots-<6CHAR_HASH><MESSAGE_ID>
-    """
-
     base_url = Var.URL.rstrip("/")
-
-    # Telegram message ID (REQUIRED by server)
     fid = fwd_msg.id
 
-    # Media info
+    media = (
+        fwd_msg.document
+        or fwd_msg.video
+        or fwd_msg.audio
+        or fwd_msg.animation
+    )
+
+    if not media or not media.file_unique_id:
+        raise ValueError("Media has no file_unique_id")
+
+    # IMPORTANT: MUST MATCH stream_routes.py (6 chars only)
+    f_hash = media.file_unique_id[:6]
+
     m_name_raw = get_fname(fwd_msg)
     m_name = (
         m_name_raw.decode("utf-8", errors="replace")
@@ -101,14 +98,9 @@ async def gen_links(fwd_msg: Message, shortener: bool = True) -> Dict[str, str]:
     )
     m_size_hr = humanbytes(get_fsize(fwd_msg))
 
-    # IMPORTANT: secure hash MUST be ONLY 6 chars
-    f_hash = get_hash(fwd_msg)[:6]
-
-    # Build links (server-compatible)
     stream_link = f"{base_url}/watch/kpsbots-{f_hash}{fid}"
     online_link = f"{base_url}/kpsbots-{f_hash}{fid}"
 
-    # Optional shortener
     if shortener and getattr(Var, "SHORTEN_MEDIA_LINKS", False):
         try:
             s_results = await asyncio.gather(
@@ -116,13 +108,8 @@ async def gen_links(fwd_msg: Message, shortener: bool = True) -> Dict[str, str]:
             )
             if not isinstance(s_results[0], Exception):
                 stream_link = s_results[0]
-            else:
-                logger.warning(f"Failed to shorten stream_link: {s_results[0]}")
-
             if not isinstance(s_results[1], Exception):
                 online_link = s_results[1]
-            else:
-                logger.warning(f"Failed to shorten online_link: {s_results[1]}")
         except Exception as e:
             logger.error(f"Error during link shortening: {e}")
 
@@ -134,12 +121,12 @@ async def gen_links(fwd_msg: Message, shortener: bool = True) -> Dict[str, str]:
     }
 
 
-# -------------------- Misc helpers --------------------
+# ====================== MISC ======================
 
 async def gen_dc_txt(usr: User) -> str:
     dc_id_val = usr.dc_id if usr.dc_id is not None else MSG_DC_UNKNOWN
     return MSG_DC_USER_INFO.format(
-        user_name=usr.first_name or 'User',
+        user_name=usr.first_name or "User",
         user_id=usr.id,
         dc_id=dc_id_val,
     )
@@ -147,7 +134,7 @@ async def gen_dc_txt(usr: User) -> str:
 
 async def get_user(cli: Client, qry: Any) -> Optional[User]:
     if isinstance(qry, str):
-        if qry.startswith('@'):
+        if qry.startswith("@"):
             return await handle_flood_wait(cli.get_users, qry)
         elif qry.isdigit():
             return await handle_flood_wait(cli.get_users, int(qry))
