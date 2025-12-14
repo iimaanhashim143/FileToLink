@@ -3,6 +3,7 @@
 import re
 import secrets
 import time
+import mimetypes
 from urllib.parse import quote, unquote
 
 from aiohttp import web
@@ -27,7 +28,7 @@ PATTERN_ID_FIRST = re.compile(r"^(\d+)(?:/.*)?$")
 VALID_HASH_REGEX = re.compile(r'^[a-zA-Z0-9_-]+$')
 
 streamers = {}
-
+mimetypes.init()
 
 def get_streamer(client_id: int) -> ByteStreamer:
     if client_id not in streamers:
@@ -114,7 +115,6 @@ def parse_range_header(range_header: str, file_size: int) -> tuple[int, int]:
 
 
 @routes.get("/", allow_head=True)
-
 async def root_redirect(request):
     raise web.HTTPFound("https://telegram.me/KPSBots")
 
@@ -123,7 +123,6 @@ async def root_redirect(request):
 async def status_endpoint(request):
     uptime = time.time() - StartTime
     total_load = sum(work_loads.values())
-
     workload_distribution = {str(k): v for k, v in sorted(work_loads.items())}
 
     return web.json_response({
@@ -139,7 +138,6 @@ async def status_endpoint(request):
         "resources": {
             "total_workload": total_load,
             "workload_distribution": workload_distribution
-
         }
     })
 
@@ -160,7 +158,6 @@ async def media_preview(request: web.Request):
             exc_info=True)
         raise web.HTTPNotFound(text="Resource not found") from e
     except Exception as e:
-
         error_id = secrets.token_hex(6)
         logger.error(f"Preview error {error_id}: {e}", exc_info=True)
         raise web.HTTPInternalServerError(
@@ -174,7 +171,6 @@ async def media_delivery(request: web.Request):
         message_id, secure_hash = parse_media_request(path, request.query)
 
         client_id, streamer = select_optimal_client()
-
         work_loads[client_id] += 1
 
         try:
@@ -199,10 +195,16 @@ async def media_delivery(request: web.Request):
             if start == 0 and end == file_size - 1:
                 range_header = ""
 
-            mime_type = (
-                file_info.get('mime_type') or 'application/octet-stream')
-            filename = (
-                file_info.get('file_name') or f"file_{secrets.token_hex(4)}")
+            filename = (file_info.get('file_name') or f"file_{secrets.token_hex(4)}")
+            
+            # --- FIX: Better MIME Type Detection for Browser Player ---
+            mime_type = file_info.get('mime_type')
+            if not mime_type or mime_type == 'application/octet-stream':
+                mime_type, _ = mimetypes.guess_type(filename)
+                if not mime_type:
+                    # Fallback to mp4 if we can't guess, helping the player to try
+                    mime_type = 'video/mp4'
+            # ----------------------------------------------------------
 
             headers = {
                 "Content-Type": mime_type,
@@ -211,7 +213,9 @@ async def media_delivery(request: web.Request):
                     f"inline; filename*=UTF-8''{quote(filename)}"),
                 "Accept-Ranges": "bytes",
                 "Cache-Control": "public, max-age=31536000",
-                "Connection": "keep-alive"
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*", # Fix for CORS issues
+                "Access-Control-Allow-Headers": "Range"
             }
 
             if range_header:
